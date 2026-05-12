@@ -19,10 +19,11 @@ DOC_EXTENSIONS = {
 CUSTOMIZATION_MARKERS = (
     "/.github/agents/",
     "/.github/skills/",
-    "/.github/hooks/",
     "/.copilot/skills/",
-    "/.copilot/hooks/",
     "/Code/User/prompts/",
+    # /.github/hooks/ and /.copilot/hooks/ are intentionally excluded:
+    # hook scripts are the enforcement layer itself and must never be
+    # silently writable by the agent they guard.
 )
 
 MUTATING_COMMAND_PATTERNS = (
@@ -87,15 +88,11 @@ READ_TOOL_NAMES = frozenset({
 # Field names that carry the target path in read tool inputs.
 READ_PATH_FIELDS = ("filePath", "path", "file_path", "filename", "file", "target")
 
-# Extracts the first non-flag argument from cat-like terminal commands.
-# This is best-effort: it catches the obvious cases (cat .env, less secrets.key)
-# but cannot enumerate every shell command or quoting variant that can read a file.
-# Known gaps: grep, awk, python/node one-liners, find -exec, diff, vim, etc.
-# Those require a different layer of defence (model-level instructions + PostToolUse hooks).
-_READ_CMD_RE = re.compile(
-    r'\b(?:cat|less|more|head|tail|bat|type|print)\s+(?:-\S+\s+)*([^\s|&;<>]+)',
-    re.IGNORECASE,
-)
+# Splits a shell command on whitespace and shell metacharacters, including
+# parentheses.  Using parentheses as delimiters lets us extract filenames
+# embedded inside function calls: open('.env'), readFileSync('id_rsa'), etc.
+_SHELL_DELIMITERS = re.compile(r'[\s|&;`()]+')
+_QUOTE_STRIP = "\"'\\"
 
 _repo_root: Path | None = None
 
@@ -292,15 +289,51 @@ def _extract_read_path(tool_name: str, tool_input: dict) -> str | None:
     return None
 
 
+def _potential_paths_in_command(command: str) -> list[str]:
+    """
+    Extract candidate file paths from a shell command string.
+
+    Splits on shell metacharacters including parentheses so that paths embedded
+    inside function calls are found:
+      grep "pw" .env          → .env
+      vim .env                → .env
+      awk '{print}' .env      → .env
+      python3 -c "open('.env').read()"   → .env   (parens split open() apart)
+      node -e "fs.readFileSync('id_rsa')" → id_rsa
+
+    Remaining gap: dynamically constructed paths such as os.path.join(d, name)
+    cannot be detected statically and require model-level controls.
+    """
+    seen: set[str] = set()
+    result: list[str] = []
+    for raw in _SHELL_DELIMITERS.split(command):
+        candidate = _normalize_path_str(raw.strip(_QUOTE_STRIP))
+        if (
+            candidate
+            and candidate not in seen
+            and not candidate.startswith("-")   # skip flags
+            and "://" not in candidate          # skip URLs
+            and not candidate.startswith("$")   # skip shell variables
+        ):
+            seen.add(candidate)
+            result.append(candidate)
+    return result
+
+
 def _check_terminal_for_ignored_reads(command: str) -> tuple[str, str] | None:
-    """Block cat/less/etc. on ignored files. Returns (decision, reason) or None."""
-    for match in _READ_CMD_RE.finditer(command):
-        path = _normalize_path_str(match.group(1).strip("\"'"))
-        ignored, source = is_ignored(path)
+    """
+    Block terminal commands that reference gitignored or high-risk files.
+
+    Checks every candidate token — not just arguments to a fixed list of
+    read commands — so grep, awk, vim, diff, python/node one-liners, and
+    find -exec are all covered by the same logic.
+    """
+    for candidate in _potential_paths_in_command(command):
+        ignored, source = is_ignored(candidate)
         if ignored:
             return (
                 "deny",
-                f"Reading '{path}' via terminal is blocked: it is excluded by {source}. "
+                f"Terminal command references '{candidate}' which is excluded by {source}. "
                 "This file may contain secrets or credentials.",
             )
     return None
