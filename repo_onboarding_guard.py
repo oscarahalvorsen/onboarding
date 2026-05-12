@@ -219,6 +219,23 @@ def _is_high_risk(path_str: str) -> bool:
     return bool(_HIGH_RISK_RE.search(normalized))
 
 
+def _resolve_symlink_target(path_str: str, repo_root: Path) -> str | None:
+    """
+    Return the fully-resolved real path if the given path is a symlink, else None.
+    Uses strict=False so missing path components do not raise.
+    """
+    try:
+        abs_path = Path(path_str)
+        if not abs_path.is_absolute():
+            abs_path = repo_root / abs_path
+        resolved = abs_path.resolve(strict=False)
+        if resolved != abs_path:
+            return str(resolved)
+    except (OSError, ValueError):
+        pass
+    return None
+
+
 def is_ignored(path_str: str) -> tuple[bool, str | None]:
     """
     Return (ignored, reason).
@@ -228,20 +245,33 @@ def is_ignored(path_str: str) -> tuple[bool, str | None]:
       2. Supplemental ignore files  (.claudeignore, .dockerignore, etc.)
       3. Hardcoded high-risk filename patterns  (defense-in-depth for files
          that contain secrets but were accidentally omitted from .gitignore)
+
+    Each check is repeated against the symlink target if the path is a symlink,
+    so that `config.local -> .env` is caught even though `config.local` itself
+    is not listed in any ignore file.
     """
     repo_root = _find_repo_root()
 
-    if _git_ignores(path_str, repo_root):
-        return True, ".gitignore"
+    for candidate, suffix in _candidates(path_str, repo_root):
+        if _git_ignores(candidate, repo_root):
+            return True, ".gitignore" + suffix
 
-    supp, source = _supplemental_ignores(path_str, repo_root)
-    if supp:
-        return True, source
+        supp, source = _supplemental_ignores(candidate, repo_root)
+        if supp:
+            return True, source + suffix
 
-    if _is_high_risk(path_str):
-        return True, "high-risk filename pattern"
+        if _is_high_risk(candidate):
+            return True, "high-risk filename pattern" + suffix
 
     return False, None
+
+
+def _candidates(path_str: str, repo_root: Path):
+    """Yield (path, label_suffix) for the path itself, then its symlink target if any."""
+    yield path_str, ""
+    target = _resolve_symlink_target(path_str, repo_root)
+    if target:
+        yield target, " (symlink target)"
 
 
 def _normalize_path_str(value: str) -> str:
