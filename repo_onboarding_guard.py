@@ -41,6 +41,17 @@ MUTATING_COMMAND_PATTERNS = (
     r"\bsed\s+-i\b",
 )
 
+# Commands that decode or execute obfuscated content.  An onboarding agent has
+# no legitimate need for any of these; their presence is a reliable signal that
+# something is trying to bypass the filename-based checks above.
+OBFUSCATION_PATTERNS = (
+    r"\bbase64\b.{0,60}(?:-d|--decode)\b",  # base64 -d / base64 --decode
+    r"\bbase64\b.*\|\s*(?:bash|sh|zsh)\b",  # base64 ... | bash  (exec decoded)
+    r"\bopenssl\s+enc\b.*-d\b",             # openssl enc -d  (symmetric decrypt)
+    r"\bxxd\s+-r\b",                         # xxd -r  (hex decode)
+    r"\beval\s+.*\$\(",                      # eval $(...)  (eval of subshell output)
+)
+
 # Ignore files that follow gitignore pattern syntax, checked in addition to git.
 # Ordered from most specific (AI tools) to most general.
 SUPPLEMENTAL_IGNORE_FILES = (
@@ -293,30 +304,43 @@ def _potential_paths_in_command(command: str) -> list[str]:
     """
     Extract candidate file paths from a shell command string.
 
-    Splits on shell metacharacters including parentheses so that paths embedded
-    inside function calls are found:
-      grep "pw" .env          → .env
-      vim .env                → .env
-      awk '{print}' .env      → .env
-      python3 -c "open('.env').read()"   → .env   (parens split open() apart)
-      node -e "fs.readFileSync('id_rsa')" → id_rsa
+    Two extraction passes per raw token:
+      1. The whole token (after quote-stripping) — catches normal arguments.
+      2. The right-hand side of the first `=` in the token — catches assignment
+         forms such as `x='.env'` and `--config=secrets.yml`.
 
-    Remaining gap: dynamically constructed paths such as os.path.join(d, name)
-    cannot be detected statically and require model-level controls.
+    Splits on shell metacharacters including parentheses so that filenames
+    inside function calls are also extracted:
+      grep "pw" .env                          → .env
+      python3 -c "open('.env').read()"        → .env   (parens split open())
+      python3 -c "x='.env'; open(x).read()"  → .env   (= split on assignment)
+      node -e "fs.readFileSync('id_rsa')"     → id_rsa
+      cat $HOME/.ssh/id_rsa                   → $HOME/.ssh/id_rsa (→ id_rsa matched)
+
+    Remaining gap: paths constructed at runtime — os.path.join(d, name),
+    string concatenation, environment-variable expansion of the full path
+    ($SECRET_FILE) — are undetectable statically.
     """
     seen: set[str] = set()
     result: list[str] = []
     for raw in _SHELL_DELIMITERS.split(command):
-        candidate = _normalize_path_str(raw.strip(_QUOTE_STRIP))
-        if (
-            candidate
-            and candidate not in seen
-            and not candidate.startswith("-")   # skip flags
-            and "://" not in candidate          # skip URLs
-            and not candidate.startswith("$")   # skip shell variables
-        ):
-            seen.add(candidate)
-            result.append(candidate)
+        # Yield the token itself, then (if it contains `=`) its RHS.
+        sub_tokens = [raw]
+        if "=" in raw:
+            sub_tokens.append(raw.split("=", 1)[1])
+
+        for sub in sub_tokens:
+            candidate = _normalize_path_str(sub.strip(_QUOTE_STRIP))
+            if (
+                candidate
+                and candidate not in seen
+                and not candidate.startswith("-")   # skip flags
+                and "://" not in candidate          # skip URLs
+                # Note: $VAR is NOT skipped — $HOME/.ssh/id_rsa still
+                # exposes `id_rsa` as the basename for high-risk matching.
+            ):
+                seen.add(candidate)
+                result.append(candidate)
     return result
 
 
@@ -472,6 +496,16 @@ def main():
 
     if tool_name == "run_in_terminal":
         command = tool_input.get("command", "")
+
+        for pattern in OBFUSCATION_PATTERNS:
+            if re.search(pattern, command):
+                emit(
+                    "deny",
+                    "Terminal command uses obfuscation (base64 decode, hex decode, eval, etc.). "
+                    "Repository Onboarding never needs to decode or execute obfuscated commands.",
+                    "This is a strong signal that something is attempting to bypass filename-based secret detection.",
+                )
+                return
 
         terminal_read_block = _check_terminal_for_ignored_reads(command)
         if terminal_read_block:
