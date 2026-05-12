@@ -54,6 +54,26 @@ SUPPLEMENTAL_IGNORE_FILES = (
     ".gitignore",       # manual fallback when git is unavailable
 )
 
+# Defense-in-depth: deny reads of these filenames even if they are not gitignored.
+# An onboarding agent has no legitimate reason to read these files.
+# This catches secrets that were accidentally omitted from .gitignore.
+_HIGH_RISK_RE = re.compile(
+    r"(?:^|[/\\])("
+    r"\.env(\.[^/\\]*)?"        # .env, .env.local, .env.production, …
+    r"|\.netrc"                  # network credentials (curl, ftp, etc.)
+    r"|\.htpasswd"               # HTTP basic-auth password files
+    r"|.*\.pem"                  # TLS certificates / private keys
+    r"|.*\.p12"                  # PKCS#12 bundles
+    r"|.*\.pfx"                  # PFX bundles (same as p12)
+    r"|.*\.jks"                  # Java KeyStore
+    r"|id_rsa(\.pub)?"           # RSA SSH key pair
+    r"|id_ed25519(\.pub)?"       # Ed25519 SSH key pair
+    r"|id_ecdsa(\.pub)?"         # ECDSA SSH key pair
+    r"|id_dsa(\.pub)?"           # DSA SSH key pair (legacy)
+    r")$",
+    re.IGNORECASE,
+)
+
 # Tool names used for reading file contents across common agent frameworks.
 READ_TOOL_NAMES = frozenset({
     "read_file",
@@ -67,8 +87,11 @@ READ_TOOL_NAMES = frozenset({
 # Field names that carry the target path in read tool inputs.
 READ_PATH_FIELDS = ("filePath", "path", "file_path", "filename", "file", "target")
 
-# Regex that extracts the first non-flag argument from cat-like terminal commands.
-# Best-effort: handles the most common cases, not all shell quoting variants.
+# Extracts the first non-flag argument from cat-like terminal commands.
+# This is best-effort: it catches the obvious cases (cat .env, less secrets.key)
+# but cannot enumerate every shell command or quoting variant that can read a file.
+# Known gaps: grep, awk, python/node one-liners, find -exec, diff, vim, etc.
+# Those require a different layer of defence (model-level instructions + PostToolUse hooks).
 _READ_CMD_RE = re.compile(
     r'\b(?:cat|less|more|head|tail|bat|type|print)\s+(?:-\S+\s+)*([^\s|&;<>]+)',
     re.IGNORECASE,
@@ -110,26 +133,59 @@ def _git_ignores(path_str: str, repo_root: Path) -> bool:
         return False
 
 
+def _gitignore_pattern_to_regex(pattern: str) -> re.Pattern[str]:
+    """
+    Convert a single gitignore pattern to a compiled regex.
+
+    Handles the gitignore-specific glob extensions that fnmatch does not:
+      **   matches any sequence of characters including path separators
+      *    matches any sequence of characters except /
+      ?    matches any single character except /
+
+    Negation (!) and directory-trailing (/) are handled by the caller.
+    """
+    tokens = re.split(r"(\*\*|\*|\?)", pattern)
+    parts: list[str] = []
+    for token in tokens:
+        if token == "**":
+            parts.append(".*")
+        elif token == "*":
+            parts.append("[^/]*")
+        elif token == "?":
+            parts.append("[^/]")
+        else:
+            parts.append(re.escape(token))
+    return re.compile("^" + "".join(parts) + "$")
+
+
 def _match_gitignore_pattern(rel_path: str, pattern: str) -> bool:
     """Match one gitignore-style pattern against a repo-relative path."""
     pattern = pattern.rstrip()
     if not pattern or pattern.startswith("#") or pattern.startswith("!"):
         return False
 
-    if pattern.endswith("/"):
+    dir_only = pattern.endswith("/")
+    if dir_only:
         pattern = pattern[:-1]
 
     if pattern.startswith("/"):
-        # Rooted pattern: anchored to repo root.
-        pattern = pattern[1:]
-        return fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(rel_path, f"{pattern}/*")
+        # Rooted: anchored to repo root — match full path or any path beneath.
+        rooted = pattern[1:]
+        rx = _gitignore_pattern_to_regex(rooted)
+        return bool(rx.match(rel_path)) or bool(
+            _gitignore_pattern_to_regex(rooted + "/*").match(rel_path)
+        )
 
     if "/" in pattern:
-        # Pattern with interior slash: relative to root.
-        return fnmatch.fnmatch(rel_path, pattern) or fnmatch.fnmatch(rel_path, f"{pattern}/*")
+        # Pattern with interior slash: relative to repo root.
+        rx = _gitignore_pattern_to_regex(pattern)
+        return bool(rx.match(rel_path)) or bool(
+            _gitignore_pattern_to_regex(pattern + "/*").match(rel_path)
+        )
 
-    # Plain filename pattern: match any path component.
-    return any(fnmatch.fnmatch(part, pattern) for part in Path(rel_path).parts)
+    # Plain filename pattern: match against any single path component.
+    rx = _gitignore_pattern_to_regex(pattern)
+    return any(bool(rx.match(part)) for part in Path(rel_path).parts)
 
 
 def _supplemental_ignores(path_str: str, repo_root: Path) -> tuple[bool, str | None]:
@@ -157,8 +213,22 @@ def _supplemental_ignores(path_str: str, repo_root: Path) -> tuple[bool, str | N
     return False, None
 
 
+def _is_high_risk(path_str: str) -> bool:
+    """Return True if the filename matches a well-known secret-file pattern."""
+    normalized = path_str.replace("\\", "/")
+    return bool(_HIGH_RISK_RE.search(normalized))
+
+
 def is_ignored(path_str: str) -> tuple[bool, str | None]:
-    """Return (ignored, reason) using git then supplemental ignore files."""
+    """
+    Return (ignored, reason).
+
+    Checks in order:
+      1. git check-ignore  (authoritative; handles nested .gitignore, global ignore, etc.)
+      2. Supplemental ignore files  (.claudeignore, .dockerignore, etc.)
+      3. Hardcoded high-risk filename patterns  (defense-in-depth for files
+         that contain secrets but were accidentally omitted from .gitignore)
+    """
     repo_root = _find_repo_root()
 
     if _git_ignores(path_str, repo_root):
@@ -168,7 +238,18 @@ def is_ignored(path_str: str) -> tuple[bool, str | None]:
     if supp:
         return True, source
 
+    if _is_high_risk(path_str):
+        return True, "high-risk filename pattern"
+
     return False, None
+
+
+def _normalize_path_str(value: str) -> str:
+    """Strip file:// prefix and normalise separators."""
+    text = value.replace("\\", "/")
+    if text.startswith("file://"):
+        text = text[7:]
+    return text
 
 
 def _extract_read_path(tool_name: str, tool_input: dict) -> str | None:
@@ -177,14 +258,14 @@ def _extract_read_path(tool_name: str, tool_input: dict) -> str | None:
     for field in READ_PATH_FIELDS:
         val = tool_input.get(field)
         if isinstance(val, str) and val.strip():
-            return val.strip()
+            return _normalize_path_str(val.strip())
     return None
 
 
 def _check_terminal_for_ignored_reads(command: str) -> tuple[str, str] | None:
     """Block cat/less/etc. on ignored files. Returns (decision, reason) or None."""
     for match in _READ_CMD_RE.finditer(command):
-        path = match.group(1).strip("\"'")
+        path = _normalize_path_str(match.group(1).strip("\"'"))
         ignored, source = is_ignored(path)
         if ignored:
             return (
@@ -250,6 +331,16 @@ def should_block_paths(paths):
     if not normalized:
         return None
 
+    # Hard-deny writes to any gitignored or high-risk file.
+    for path in normalized:
+        ignored, source = is_ignored(path)
+        if ignored:
+            return (
+                "deny",
+                f"Writing to '{path}' is blocked: it is excluded by {source}. "
+                "This file may contain secrets or credentials.",
+            )
+
     non_doc_paths = [path for path in normalized if not is_doc_or_customization(path)]
     if not non_doc_paths:
         return None
@@ -294,7 +385,7 @@ def main():
     tool_name = payload.get("tool_name")
     tool_input = payload.get("tool_input") or {}
 
-    # Block reads of gitignored / AI-excluded files (secrets protection).
+    # Block reads of gitignored / AI-excluded / high-risk files.
     read_path = _extract_read_path(tool_name, tool_input)
     if read_path:
         ignored, source = is_ignored(read_path)
