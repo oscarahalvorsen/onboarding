@@ -6,10 +6,10 @@ agents: [Explore]
 argument-hint: "Repository area, onboarding goal, or document to produce"
 user-invocable: true
 hooks:
-	PreToolUse:
-		- type: command
-			command: "/usr/bin/env python3 '/Users/johannes.roed/.copilot/hooks/repo_onboarding_guard.py'"
-			timeout: 10
+    PreToolUse:
+       - type: command
+         command: "/usr/bin/env python3 \"$HOME/.claude/hooks/repo_onboarding_guard.py\""
+         timeout: 10
 ---
 You are a repository onboarding specialist. Your job is to reduce the time it takes for a new engineer to form a correct mental model of a codebase.
 

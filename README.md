@@ -1,6 +1,6 @@
-# twoday/onboarding
+# Onboarding
 
-A Claude Code agent configuration that turns any repository into an onboarding-ready codebase. Point it at a repo and it produces orientation material — architecture summaries, component maps, reading orders, and Mermaid diagrams — optimised for new engineers.
+A Claude Code agent configuration that turns any repository into an onboarding-ready codebase. Point it at a repo and it produces orientation material like architecture summaries, component maps, reading orders, and Mermaid diagrams.
 
 ---
 
@@ -21,38 +21,17 @@ A Claude Code agent configuration that turns any repository into an onboarding-r
    cd onboarding
    ```
 
-2. Register the agent in Claude Code by copying the agent file to your Claude configuration directory, or open the repo directly in Claude Code — the `.claude/` directory is picked up automatically.
+2. Copy both files to your Claude configuration directory:
 
-3. Update the hook path in `repo-onboarding.agent.md` to point to your local copy of the guard script:
-
-   ```yaml
-   hooks:
-     PreToolUse:
-       - type: command
-         command: "/usr/bin/env python3 '/your/local/path/repo_onboarding_guard.py'"
-         timeout: 10
+   ```bash
+   mkdir -p ~/.claude/hooks ~/.claude/agents
+   cp repo_onboarding_guard.py ~/.claude/hooks/
+   cp repo-onboarding.agent.md ~/.claude/agents/
    ```
 
----
+   The agent file references the guard script at `$HOME/.claude/hooks/repo_onboarding_guard.py`, so the path resolves correctly for any user without editing.
 
-## Configuration
-
-The agent has no environment variables. All configuration lives in two files.
-
-| File | Purpose |
-|---|---|
-| `repo-onboarding.agent.md` | Agent definition: tools, skills, hooks, and behavioral instructions |
-| `repo_onboarding_guard.py` | PreToolUse hook that enforces read-only, secret-safe access |
-
-### Guard customisation
-
-The guard (`repo_onboarding_guard.py`) controls what the agent is allowed to do. You can adjust these constants near the top of the file:
-
-- `MUTATING_COMMAND_PATTERNS` — shell patterns that trigger a confirmation prompt before running
-- `SUPPLEMENTAL_IGNORE_FILES` — additional ignore-file names checked alongside `.gitignore`
-- `_HOME_RELATIVE_DENYLIST` — home-directory paths that are always blocked (`.aws/`, `.ssh/`, etc.)
-
-No restart is required; the hook is re-executed from disk on every tool call.
+   To limit the agent to a single project instead, copy `repo-onboarding.agent.md` into that project's `.claude/agents/` folder rather than `~/.claude/agents/`.
 
 ---
 
@@ -93,14 +72,6 @@ Expected output: a Mermaid diagram block with a short caption, inline in chat or
 ---
 
 ## Common Issues
-
-### Hook path not found
-
-**Symptom:** `PreToolUse hook failed: No such file or directory`
-
-**Fix:** Update the `command` path in `repo-onboarding.agent.md` to the absolute path where you cloned the guard script.
-
----
 
 ### Guard blocks all file operations with "git unavailable"
 
