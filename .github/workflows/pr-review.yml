@@ -25,18 +25,60 @@ jobs:
 
       - name: Call Foundry Agent
         id: review
+        env:
+          FOUNDRY_ENDPOINT: ${{ secrets.FOUNDRY_ENDPOINT }}
+          FOUNDRY_API_KEY: ${{ secrets.FOUNDRY_API_KEY }}
+          FOUNDRY_AGENT_ID: ${{ secrets.FOUNDRY_AGENT_ID }}
+          PR_DIFF: ${{ steps.diff.outputs.diff }}
         run: |
-          RESPONSE=$(curl -s -X POST "${{ secrets.FOUNDRY_ENDPOINT }}/agents/${{ secrets.FOUNDRY_AGENT_ID }}/threads/runs" \
-            -H "Content-Type: application/json" \
-            -H "api-key: ${{ secrets.FOUNDRY_API_KEY }}" \
-            -d '{
-              "messages": [{
-                "role": "user",
-                "content": "Review this PR diff:\n\n${{ steps.diff.outputs.diff }}"
-              }]
-            }')
-          REVIEW=$(echo $RESPONSE | jq -r '.content[0].text')
-          echo "review=$REVIEW" >> $GITHUB_OUTPUT
+          python3 - <<'EOF'
+          import os, json, urllib.request, time
+
+          endpoint = os.environ["FOUNDRY_ENDPOINT"].rstrip("/")
+          api_key = os.environ["FOUNDRY_API_KEY"]
+          agent_id = os.environ["FOUNDRY_AGENT_ID"]
+          diff = os.environ["PR_DIFF"]
+
+          headers = {
+              "Content-Type": "application/json",
+              "api-key": api_key
+          }
+
+          # Create thread
+          req = urllib.request.Request(f"{endpoint}/threads?api-version=2024-05-01-preview",
+              data=json.dumps({}).encode(), headers=headers)
+          thread = json.loads(urllib.request.urlopen(req).read())
+          thread_id = thread["id"]
+
+          # Add message
+          req = urllib.request.Request(f"{endpoint}/threads/{thread_id}/messages?api-version=2024-05-01-preview",
+              data=json.dumps({"role": "user", "content": f"Review this PR diff:\n\n{diff}"}).encode(), headers=headers)
+          urllib.request.urlopen(req)
+
+          # Run agent
+          req = urllib.request.Request(f"{endpoint}/threads/{thread_id}/runs?api-version=2024-05-01-preview",
+              data=json.dumps({"assistant_id": agent_id}).encode(), headers=headers)
+          run = json.loads(urllib.request.urlopen(req).read())
+          run_id = run["id"]
+
+          # Poll until complete
+          for _ in range(30):
+              time.sleep(3)
+              req = urllib.request.Request(f"{endpoint}/threads/{thread_id}/runs/{run_id}?api-version=2024-05-01-preview",
+                  headers=headers)
+              run = json.loads(urllib.request.urlopen(req).read())
+              if run["status"] in ["completed", "failed", "cancelled"]:
+                  break
+
+          # Get messages
+          req = urllib.request.Request(f"{endpoint}/threads/{thread_id}/messages?api-version=2024-05-01-preview",
+              headers=headers)
+          msgs = json.loads(urllib.request.urlopen(req).read())
+          review = msgs["data"][0]["content"][0]["text"]["value"]
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              f.write(f"review<<EOF\n{review}\nEOF\n")
+          EOF
 
       - name: Post PR comment
         uses: actions/github-script@v7
