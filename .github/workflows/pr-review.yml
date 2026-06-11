@@ -3,13 +3,16 @@ name: AI PR Review
 on:
   pull_request:
     types: [opened, synchronize]
+    branches-ignore:
+      - main  # Fjern denne linjen når du har testet på draft-PRs
 
 jobs:
   review:
     runs-on: ubuntu-latest
+    # Kjører kun på draft-PRs under testing — fjern når klar for alle PRs
+    if: github.event.pull_request.draft == true
     permissions:
       pull-requests: write
-
     steps:
       - uses: actions/checkout@v4
         with:
@@ -18,7 +21,7 @@ jobs:
       - name: Get diff
         id: diff
         run: |
-          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD)
+          DIFF=$(git diff origin/${{ github.base_ref }}...HEAD | head -c 20000)
           echo "diff<<EOF" >> $GITHUB_OUTPUT
           echo "$DIFF" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
@@ -44,6 +47,26 @@ jobs:
               "Authorization": f"Bearer {token}"
           }
 
+          system_context = """Du er en erfaren .NET-utvikler som reviewer pull requests for Twolate,
+          et internt automatiseringsverktøy for tidsregistrering og fakturering bygget med:
+          - Blazor Server (.NET 10)
+          - React (frontend-komponenter)
+          - Azure Cosmos Table Storage
+          - Azure Storage Queues
+          - Azure Communication Services (e-post)
+          - Azure App Configuration
+          - Application Insights
+          - Multi-agent pipelines (Azure AI Foundry)
+
+          Fokuser på:
+          1. Korrekthet og logiske feil
+          2. Azure SDK-bruk og async/await-mønstre
+          3. Feil håndtering av Cosmos- eller Queue-operasjoner
+          4. Sikkerhet (eksponerte secrets, manglende autorisasjonssjekker)
+          5. Ytelse (unødvendige await-er, N+1-mønstre mot Cosmos)
+
+          Vær kortfattet. Bruk bullet points. Skill mellom kritiske funn og nice-to-have."""
+
           print(f"Endpoint: {endpoint}")
           print(f"Agent ID: {agent_id}")
 
@@ -56,13 +79,17 @@ jobs:
           except urllib.error.HTTPError as e:
               print(f"Create thread failed: {e.code} {e.read().decode()}")
               raise
-
           thread_id = thread["id"]
           print(f"Thread ID: {thread_id}")
 
           # Add message
           url = f"{endpoint}/threads/{thread_id}/messages?api-version=2025-05-01"
-          req = urllib.request.Request(url, data=json.dumps({"role": "user", "content": f"Review this PR diff:\n\n{diff}"}).encode(), headers=headers)
+          message_content = f"{system_context}\n\nReview denne PR-diffen:\n\n{diff}"
+          req = urllib.request.Request(
+              url,
+              data=json.dumps({"role": "user", "content": message_content}).encode(),
+              headers=headers
+          )
           try:
               urllib.request.urlopen(req)
           except urllib.error.HTTPError as e:
@@ -71,13 +98,16 @@ jobs:
 
           # Run agent
           url = f"{endpoint}/threads/{thread_id}/runs?api-version=2025-05-01"
-          req = urllib.request.Request(url, data=json.dumps({"assistant_id": agent_id}).encode(), headers=headers)
+          req = urllib.request.Request(
+              url,
+              data=json.dumps({"assistant_id": agent_id}).encode(),
+              headers=headers
+          )
           try:
               run = json.loads(urllib.request.urlopen(req).read())
           except urllib.error.HTTPError as e:
               print(f"Run agent failed: {e.code} {e.read().decode()}")
               raise
-
           run_id = run["id"]
           print(f"Run ID: {run_id}")
 
@@ -90,6 +120,9 @@ jobs:
               print(f"Poll {i}: {run['status']}")
               if run["status"] in ["completed", "failed", "cancelled"]:
                   break
+
+          if run["status"] != "completed":
+              raise Exception(f"Run ended with status: {run['status']}")
 
           # Get messages
           url = f"{endpoint}/threads/{thread_id}/messages?api-version=2025-05-01"
