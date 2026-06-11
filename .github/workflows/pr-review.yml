@@ -48,7 +48,7 @@ jobs:
           print(f"Agent ID: {agent_id}")
 
           # Create thread
-          url = f"{endpoint}/threads?api-version=2024-05-01-preview"
+          url = f"{endpoint}/threads?api-version=2025-01-01-preview"
           print(f"Creating thread at: {url}")
           req = urllib.request.Request(url, data=json.dumps({}).encode(), headers=headers)
           try:
@@ -61,7 +61,7 @@ jobs:
           print(f"Thread ID: {thread_id}")
 
           # Add message
-          url = f"{endpoint}/threads/{thread_id}/messages?api-version=2024-05-01-preview"
+          url = f"{endpoint}/threads/{thread_id}/messages?api-version=2025-01-01-preview"
           req = urllib.request.Request(url, data=json.dumps({"role": "user", "content": f"Review this PR diff:\n\n{diff}"}).encode(), headers=headers)
           try:
               urllib.request.urlopen(req)
@@ -70,7 +70,7 @@ jobs:
               raise
 
           # Run agent
-          url = f"{endpoint}/threads/{thread_id}/runs?api-version=2024-05-01-preview"
+          url = f"{endpoint}/threads/{thread_id}/runs?api-version=2025-01-01-preview"
           req = urllib.request.Request(url, data=json.dumps({"assistant_id": agent_id}).encode(), headers=headers)
           try:
               run = json.loads(urllib.request.urlopen(req).read())
@@ -84,7 +84,7 @@ jobs:
           # Poll until complete
           for i in range(30):
               time.sleep(3)
-              url = f"{endpoint}/threads/{thread_id}/runs/{run_id}?api-version=2024-05-01-preview"
+              url = f"{endpoint}/threads/{thread_id}/runs/{run_id}?api-version=2025-01-01-preview"
               req = urllib.request.Request(url, headers=headers)
               run = json.loads(urllib.request.urlopen(req).read())
               print(f"Poll {i}: {run['status']}")
@@ -92,7 +92,7 @@ jobs:
                   break
 
           # Get messages
-          url = f"{endpoint}/threads/{thread_id}/messages?api-version=2024-05-01-preview"
+          url = f"{endpoint}/threads/{thread_id}/messages?api-version=2025-01-01-preview"
           req = urllib.request.Request(url, headers=headers)
           msgs = json.loads(urllib.request.urlopen(req).read())
           review = msgs["data"][0]["content"][0]["text"]["value"]
