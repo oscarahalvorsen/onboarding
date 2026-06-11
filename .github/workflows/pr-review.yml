@@ -32,7 +32,7 @@ jobs:
           PR_DIFF: ${{ steps.diff.outputs.diff }}
         run: |
           python3 - <<'EOF'
-          import os, json, urllib.request, time
+          import os, json, urllib.request, urllib.error, time
 
           endpoint = os.environ["FOUNDRY_ENDPOINT"].rstrip("/")
           api_key = os.environ["FOUNDRY_API_KEY"]
@@ -44,35 +44,56 @@ jobs:
               "api-key": api_key
           }
 
+          print(f"Endpoint: {endpoint}")
+          print(f"Agent ID: {agent_id}")
+
           # Create thread
-          req = urllib.request.Request(f"{endpoint}/threads?api-version=2024-05-01-preview",
-              data=json.dumps({}).encode(), headers=headers)
-          thread = json.loads(urllib.request.urlopen(req).read())
+          url = f"{endpoint}/threads?api-version=2024-05-01-preview"
+          print(f"Creating thread at: {url}")
+          req = urllib.request.Request(url, data=json.dumps({}).encode(), headers=headers)
+          try:
+              thread = json.loads(urllib.request.urlopen(req).read())
+          except urllib.error.HTTPError as e:
+              print(f"Create thread failed: {e.code} {e.read().decode()}")
+              raise
+
           thread_id = thread["id"]
+          print(f"Thread ID: {thread_id}")
 
           # Add message
-          req = urllib.request.Request(f"{endpoint}/threads/{thread_id}/messages?api-version=2024-05-01-preview",
-              data=json.dumps({"role": "user", "content": f"Review this PR diff:\n\n{diff}"}).encode(), headers=headers)
-          urllib.request.urlopen(req)
+          url = f"{endpoint}/threads/{thread_id}/messages?api-version=2024-05-01-preview"
+          req = urllib.request.Request(url, data=json.dumps({"role": "user", "content": f"Review this PR diff:\n\n{diff}"}).encode(), headers=headers)
+          try:
+              urllib.request.urlopen(req)
+          except urllib.error.HTTPError as e:
+              print(f"Add message failed: {e.code} {e.read().decode()}")
+              raise
 
           # Run agent
-          req = urllib.request.Request(f"{endpoint}/threads/{thread_id}/runs?api-version=2024-05-01-preview",
-              data=json.dumps({"assistant_id": agent_id}).encode(), headers=headers)
-          run = json.loads(urllib.request.urlopen(req).read())
+          url = f"{endpoint}/threads/{thread_id}/runs?api-version=2024-05-01-preview"
+          req = urllib.request.Request(url, data=json.dumps({"assistant_id": agent_id}).encode(), headers=headers)
+          try:
+              run = json.loads(urllib.request.urlopen(req).read())
+          except urllib.error.HTTPError as e:
+              print(f"Run agent failed: {e.code} {e.read().decode()}")
+              raise
+
           run_id = run["id"]
+          print(f"Run ID: {run_id}")
 
           # Poll until complete
-          for _ in range(30):
+          for i in range(30):
               time.sleep(3)
-              req = urllib.request.Request(f"{endpoint}/threads/{thread_id}/runs/{run_id}?api-version=2024-05-01-preview",
-                  headers=headers)
+              url = f"{endpoint}/threads/{thread_id}/runs/{run_id}?api-version=2024-05-01-preview"
+              req = urllib.request.Request(url, headers=headers)
               run = json.loads(urllib.request.urlopen(req).read())
+              print(f"Poll {i}: {run['status']}")
               if run["status"] in ["completed", "failed", "cancelled"]:
                   break
 
           # Get messages
-          req = urllib.request.Request(f"{endpoint}/threads/{thread_id}/messages?api-version=2024-05-01-preview",
-              headers=headers)
+          url = f"{endpoint}/threads/{thread_id}/messages?api-version=2024-05-01-preview"
+          req = urllib.request.Request(url, headers=headers)
           msgs = json.loads(urllib.request.urlopen(req).read())
           review = msgs["data"][0]["content"][0]["text"]["value"]
 
