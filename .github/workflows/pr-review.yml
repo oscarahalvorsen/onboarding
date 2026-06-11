@@ -3,8 +3,6 @@ name: AI PR Review
 on:
   pull_request:
     types: [opened, synchronize]
-    branches-ignore:
-      - main  # Fjern denne linjen når du har testet på draft-PRs
 
 jobs:
   review:
