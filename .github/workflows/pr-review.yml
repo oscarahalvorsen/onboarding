@@ -27,7 +27,7 @@ jobs:
         id: review
         env:
           FOUNDRY_ENDPOINT: ${{ secrets.FOUNDRY_ENDPOINT }}
-          FOUNDRY_API_KEY: ${{ secrets.FOUNDRY_API_KEY }}
+          FOUNDRY_TOKEN: ${{ secrets.FOUNDRY_TOKEN }}
           FOUNDRY_AGENT_ID: ${{ secrets.FOUNDRY_AGENT_ID }}
           PR_DIFF: ${{ steps.diff.outputs.diff }}
         run: |
@@ -35,13 +35,13 @@ jobs:
           import os, json, urllib.request, urllib.error, time
 
           endpoint = os.environ["FOUNDRY_ENDPOINT"].rstrip("/")
-          api_key = os.environ["FOUNDRY_API_KEY"]
+          token = os.environ["FOUNDRY_TOKEN"]
           agent_id = os.environ["FOUNDRY_AGENT_ID"]
           diff = os.environ["PR_DIFF"]
 
           headers = {
               "Content-Type": "application/json",
-              "api-key": api_key
+              "Authorization": f"Bearer {token}"
           }
 
           print(f"Endpoint: {endpoint}")
