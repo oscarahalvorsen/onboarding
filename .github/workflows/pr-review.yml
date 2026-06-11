@@ -7,8 +7,6 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
-    # Kjører kun på draft-PRs under testing — fjern når klar for alle PRs
-    if: github.event.pull_request.draft == true
     permissions:
       pull-requests: write
     steps:
