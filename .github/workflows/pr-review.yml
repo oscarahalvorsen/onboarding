@@ -40,7 +40,7 @@ jobs:
 
           headers = {
               "Content-Type": "application/json",
-              "Authorization": f"Bearer {token}"
+              "api-key": token
           }
 
           system_context = """Du er en erfaren .NET-utvikler som reviewer pull requests for Twolate,
